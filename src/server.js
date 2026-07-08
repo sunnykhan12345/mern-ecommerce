@@ -6,6 +6,7 @@ import userRouter from "./routes/userRoute.js";
 import productRouter from "./routes/productRoute.js";
 import cartRouter from "./routes/cartRoute.js";
 import addressRouter from "./routes/addressRoute.js";
+import orderRoute from "./routes/orderRoute.js";
 dotenv.config();
 console.log("JWT_SECRET:", process.env.JWT_SECRET);
 // connect database
