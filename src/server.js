@@ -5,6 +5,7 @@ import { connectDB } from "./config/db.js";
 import userRouter from "./routes/userRoute.js";
 import productRouter from "./routes/productRoute.js";
 import cartRouter from "./routes/cartRoute.js";
+import addressRouter from "./routes/addressRoute.js";
 dotenv.config();
 console.log("JWT_SECRET:", process.env.JWT_SECRET);
 // connect database
@@ -16,6 +17,7 @@ app.use(express.json());
 app.use("/api/auth", userRouter);
 app.use("/api/products", productRouter);
 app.use("/api/cart", cartRouter);
+app.use("/api/address", addressRouter);
 const PORT = process.env.PORT || 3000;
 
 app.get("/", (req, res) => {
