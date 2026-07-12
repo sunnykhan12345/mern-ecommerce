@@ -1,10 +1,13 @@
 import bcrypt from "bcrypt";
 import jwt from "jsonwebtoken";
+
 import User from "../models/User.js";
 import cloudinary from "../config/cloudinary.js";
 import uploadToCloudinary from "../utils/uploadToCloudinary.js";
 
-const normalizeEmail = (email = "") => email.trim().toLowerCase();
+const normalizeEmail = (email = "") => {
+  return String(email).trim().toLowerCase();
+};
 
 const getAuthenticatedUserId = (req) => {
   return req.user?._id || req.user?.id;
@@ -62,6 +65,10 @@ export const registerUser = async (req, res) => {
       name,
       email,
       password: hashedPassword,
+      profileImage: {
+        url: "",
+        public_id: "",
+      },
     });
 
     return res.status(201).json({
@@ -70,7 +77,7 @@ export const registerUser = async (req, res) => {
       user: formatUserResponse(user),
     });
   } catch (error) {
-    console.error("Register Error:", error);
+    console.error("REGISTER ERROR:", error);
 
     if (error?.code === 11000) {
       return res.status(409).json({
@@ -81,7 +88,7 @@ export const registerUser = async (req, res) => {
 
     return res.status(500).json({
       success: false,
-      message: "Internal Server Error",
+      message: error.message || "Internal Server Error",
     });
   }
 };
@@ -139,11 +146,11 @@ export const loginUser = async (req, res) => {
       user: formatUserResponse(user),
     });
   } catch (error) {
-    console.error("Login Error:", error);
+    console.error("LOGIN ERROR:", error);
 
     return res.status(500).json({
       success: false,
-      message: "Internal Server Error",
+      message: error.message || "Internal Server Error",
     });
   }
 };
@@ -174,11 +181,11 @@ export const getMe = async (req, res) => {
       user: formatUserResponse(user),
     });
   } catch (error) {
-    console.error("Get Me Error:", error);
+    console.error("GET ME ERROR:", error);
 
     return res.status(500).json({
       success: false,
-      message: "Internal Server Error",
+      message: error.message || "Internal Server Error",
     });
   }
 };
@@ -186,6 +193,7 @@ export const getMe = async (req, res) => {
 // PUT /api/auth/profile
 export const updateProfile = async (req, res) => {
   let newlyUploadedPublicId = "";
+  let imageSavedToDatabase = false;
 
   try {
     const userId = getAuthenticatedUserId(req);
@@ -209,7 +217,7 @@ export const updateProfile = async (req, res) => {
     const { name, email, phone } = req.body;
 
     if (name !== undefined) {
-      const cleanName = name.trim();
+      const cleanName = String(name).trim();
 
       if (!cleanName) {
         return res.status(400).json({
@@ -233,7 +241,9 @@ export const updateProfile = async (req, res) => {
 
       const emailOwner = await User.findOne({
         email: cleanEmail,
-        _id: { $ne: user._id },
+        _id: {
+          $ne: user._id,
+        },
       });
 
       if (emailOwner) {
@@ -247,48 +257,84 @@ export const updateProfile = async (req, res) => {
     }
 
     if (phone !== undefined) {
-      user.phone = phone.trim();
+      user.phone = String(phone).trim();
     }
 
     const previousImagePublicId = user.profileImage?.public_id || "";
 
     if (req.file) {
+      console.log("FILE RECEIVED BY CONTROLLER:", {
+        originalname: req.file.originalname,
+        mimetype: req.file.mimetype,
+        size: req.file.size,
+        hasBuffer: Boolean(req.file.buffer),
+      });
+
       const uploadedImage = await uploadToCloudinary(
         req.file,
         "ecommerce/users",
       );
 
+      if (!uploadedImage?.url || !uploadedImage?.public_id) {
+        throw new Error("Cloudinary did not return url and public_id.");
+      }
+
       newlyUploadedPublicId = uploadedImage.public_id;
-      user.profileImage = uploadedImage;
+
+      user.set("profileImage", {
+        url: uploadedImage.url,
+        public_id: uploadedImage.public_id,
+      });
     }
 
+    // Save exactly once
     await user.save();
 
+    imageSavedToDatabase = true;
+
+    // Read it again from MongoDB to confirm persistence
+    const savedUser = await User.findById(user._id);
+
+    if (!savedUser) {
+      throw new Error("User could not be read after profile update.");
+    }
+
+    console.log("PROFILE SAVED IN DATABASE:", {
+      userId: savedUser._id,
+      profileImage: savedUser.profileImage,
+    });
+
+    // Delete the previous Cloudinary image only after DB save succeeds
     if (
       req.file &&
       previousImagePublicId &&
-      previousImagePublicId !== user.profileImage.public_id
+      previousImagePublicId !== savedUser.profileImage?.public_id
     ) {
       try {
-        await cloudinary.uploader.destroy(previousImagePublicId);
+        await cloudinary.uploader.destroy(previousImagePublicId, {
+          resource_type: "image",
+        });
       } catch (deleteError) {
-        console.error("Previous Cloudinary image delete error:", deleteError);
+        console.error("OLD CLOUDINARY IMAGE DELETE ERROR:", deleteError);
       }
     }
 
     return res.status(200).json({
       success: true,
       message: "Profile updated successfully",
-      user: formatUserResponse(user),
+      user: formatUserResponse(savedUser),
     });
   } catch (error) {
-    console.error("Update Profile Error:", error);
+    console.error("UPDATE PROFILE ERROR:", error);
 
-    if (newlyUploadedPublicId) {
+    // Delete a new Cloudinary image only when MongoDB save failed
+    if (newlyUploadedPublicId && !imageSavedToDatabase) {
       try {
-        await cloudinary.uploader.destroy(newlyUploadedPublicId);
+        await cloudinary.uploader.destroy(newlyUploadedPublicId, {
+          resource_type: "image",
+        });
       } catch (cleanupError) {
-        console.error("New Cloudinary image cleanup error:", cleanupError);
+        console.error("NEW IMAGE CLEANUP ERROR:", cleanupError);
       }
     }
 
@@ -301,7 +347,7 @@ export const updateProfile = async (req, res) => {
 
     return res.status(500).json({
       success: false,
-      message: error?.message || "Internal Server Error",
+      message: error?.message || "Unable to update profile",
     });
   }
 };
@@ -310,6 +356,7 @@ export const updateProfile = async (req, res) => {
 export const changePassword = async (req, res) => {
   try {
     const userId = getAuthenticatedUserId(req);
+
     const { currentPassword, newPassword } = req.body;
 
     if (!userId) {
@@ -370,11 +417,11 @@ export const changePassword = async (req, res) => {
       message: "Password changed successfully",
     });
   } catch (error) {
-    console.error("Change Password Error:", error);
+    console.error("CHANGE PASSWORD ERROR:", error);
 
     return res.status(500).json({
       success: false,
-      message: "Internal Server Error",
+      message: error.message || "Internal Server Error",
     });
   }
 };
@@ -413,11 +460,11 @@ export const forgotPassword = async (req, res) => {
       otp,
     });
   } catch (error) {
-    console.error("Forgot Password Error:", error);
+    console.error("FORGOT PASSWORD ERROR:", error);
 
     return res.status(500).json({
       success: false,
-      message: "Internal Server Error",
+      message: error.message || "Internal Server Error",
     });
   }
 };
@@ -463,11 +510,11 @@ export const verifyOtp = async (req, res) => {
       message: "OTP verified successfully",
     });
   } catch (error) {
-    console.error("Verify OTP Error:", error);
+    console.error("VERIFY OTP ERROR:", error);
 
     return res.status(500).json({
       success: false,
-      message: "Internal Server Error",
+      message: error.message || "Internal Server Error",
     });
   }
 };
@@ -477,6 +524,7 @@ export const resetPassword = async (req, res) => {
   try {
     const email = normalizeEmail(req.body.email);
     const otp = String(req.body.otp || "").trim();
+
     const { newPassword, confirmPassword } = req.body;
 
     if (!email || !otp || !newPassword || !confirmPassword) {
@@ -524,6 +572,7 @@ export const resetPassword = async (req, res) => {
     }
 
     user.password = await bcrypt.hash(newPassword, 10);
+
     user.otp = null;
     user.otpExpiry = null;
 
@@ -534,11 +583,11 @@ export const resetPassword = async (req, res) => {
       message: "Password reset successfully",
     });
   } catch (error) {
-    console.error("Reset Password Error:", error);
+    console.error("RESET PASSWORD ERROR:", error);
 
     return res.status(500).json({
       success: false,
-      message: "Internal Server Error",
+      message: error.message || "Internal Server Error",
     });
   }
 };

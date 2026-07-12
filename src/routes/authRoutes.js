@@ -16,6 +16,35 @@ import upload from "../middlewares/uploadMiddleware.js";
 
 const router = express.Router();
 
+const handleProfileImageUpload = (req, res, next) => {
+  upload.single("profileImage")(req, res, (error) => {
+    if (error) {
+      console.error("PROFILE IMAGE MULTER ERROR:", error);
+
+      return res.status(400).json({
+        success: false,
+        message: error.message || "Profile image upload failed.",
+      });
+    }
+
+    console.log("PROFILE UPLOAD REQUEST:", {
+      contentType: req.headers["content-type"],
+      body: req.body,
+      file: req.file
+        ? {
+            fieldname: req.file.fieldname,
+            originalname: req.file.originalname,
+            mimetype: req.file.mimetype,
+            size: req.file.size,
+            hasBuffer: Boolean(req.file.buffer),
+          }
+        : null,
+    });
+
+    return next();
+  });
+};
+
 router.post("/signup", registerUser);
 router.post("/login", loginUser);
 
@@ -25,35 +54,7 @@ router.put("/reset-password", resetPassword);
 
 router.get("/me", authMiddleware, getMe);
 
-router.put(
-  "/profile",
-  authMiddleware,
-
-  // This middleware reads multipart/form-data
-  upload.single("profileImage"),
-
-  (req, res, next) => {
-    console.log("PROFILE REQUEST CONTENT TYPE:", req.headers["content-type"]);
-
-    console.log("PROFILE REQUEST BODY:", req.body);
-
-    console.log(
-      "PROFILE REQUEST FILE:",
-      req.file
-        ? {
-            fieldname: req.file.fieldname,
-            originalname: req.file.originalname,
-            mimetype: req.file.mimetype,
-            size: req.file.size,
-          }
-        : null,
-    );
-
-    next();
-  },
-
-  updateProfile,
-);
+router.put("/profile", authMiddleware, handleProfileImageUpload, updateProfile);
 
 router.put("/change-password", authMiddleware, changePassword);
 
