@@ -47,6 +47,11 @@ const userSchema = new Schema(
       default: null,
     },
 
+    isOtpVerified: {
+      type: Boolean,
+      default: false,
+    },
+
     profileImage: {
       url: {
         type: String,

@@ -1,37 +1,34 @@
-import "dotenv/config";
+import "./config/loadEnv.js";
 import express from "express";
 import cors from "cors";
 
 import { connectDB } from "./config/db.js";
+import "./config/cloudinary.js";
 import userRouter from "./routes/authRoutes.js";
 import productRouter from "./routes/productRoute.js";
 import cartRouter from "./routes/cartRoute.js";
 import addressRouter from "./routes/addressRoute.js";
 import orderRouter from "./routes/orderRoute.js";
+import wishlistRouter from "./routes/wishlistRoute.js";
 
 const app = express();
 
 const PORT = process.env.PORT || 8080;
 const FRONTEND_URL = process.env.FRONTEND_URL || "http://localhost:5173";
 
-/*
- * CORS configuration
- */
 app.use(
   cors({
-    origin: FRONTEND_URL,
+    origin: [
+      FRONTEND_URL,
+      "http://localhost:5173",
+      "http://localhost:5174",
+    ],
     credentials: true,
     methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
     allowedHeaders: ["Content-Type", "Authorization"],
   }),
 );
 
-/*
- * Request body parsers
- *
- * JSON requests are handled here.
- * Profile image multipart/form-data is handled by Multer.
- */
 app.use(
   express.json({
     limit: "10mb",
@@ -45,9 +42,6 @@ app.use(
   }),
 );
 
-/*
- * Health-check route
- */
 app.get("/", (req, res) => {
   return res.status(200).json({
     success: true,
@@ -55,18 +49,13 @@ app.get("/", (req, res) => {
   });
 });
 
-/*
- * API routes
- */
 app.use("/api/auth", userRouter);
 app.use("/api/products", productRouter);
 app.use("/api/cart", cartRouter);
 app.use("/api/address", addressRouter);
 app.use("/api/orders", orderRouter);
+app.use("/api/wishlist", wishlistRouter);
 
-/*
- * Unknown route handler
- */
 app.use((req, res) => {
   return res.status(404).json({
     success: false,
@@ -74,9 +63,6 @@ app.use((req, res) => {
   });
 });
 
-/*
- * Global error handler
- */
 app.use((error, req, res, next) => {
   console.error("GLOBAL SERVER ERROR:", error);
 
@@ -86,9 +72,6 @@ app.use((error, req, res, next) => {
   });
 });
 
-/*
- * Connect to MongoDB first, then start Express.
- */
 const startServer = async () => {
   try {
     await connectDB();
@@ -98,7 +81,6 @@ const startServer = async () => {
     });
   } catch (error) {
     console.error("Server startup failed:", error);
-
     process.exit(1);
   }
 };

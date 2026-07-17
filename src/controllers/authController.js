@@ -1,9 +1,13 @@
 import bcrypt from "bcrypt";
 import jwt from "jsonwebtoken";
+import crypto from "crypto";
 
 import User from "../models/User.js";
 import cloudinary from "../config/cloudinary.js";
 import uploadToCloudinary from "../utils/uploadToCloudinary.js";
+import { sendOtpEmail } from "../utils/sendEmail.js";
+
+const OTP_EXPIRY_MS = 10 * 60 * 1000;
 
 const normalizeEmail = (email = "") => {
   return String(email).trim().toLowerCase();
@@ -27,6 +31,40 @@ const formatUserResponse = (user) => {
     createdAt: user.createdAt,
     updatedAt: user.updatedAt,
   };
+};
+
+const generateOtp = () => {
+  return String(crypto.randomInt(100000, 1000000));
+};
+
+const clearOtpFields = (user) => {
+  user.otp = null;
+  user.otpExpiry = null;
+  user.isOtpVerified = false;
+};
+
+const issueAndSendOtp = async (user) => {
+  const otp = generateOtp();
+
+  user.otp = otp;
+  user.otpExpiry = new Date(Date.now() + OTP_EXPIRY_MS);
+  user.isOtpVerified = false;
+
+  await user.save();
+
+  try {
+    await sendOtpEmail({
+      to: user.email,
+      name: user.name,
+      otp,
+    });
+  } catch (emailError) {
+    clearOtpFields(user);
+    await user.save();
+    throw emailError;
+  }
+
+  return otp;
 };
 
 // POST /api/auth/signup
@@ -215,6 +253,7 @@ export const updateProfile = async (req, res) => {
     }
 
     const { name, email, phone } = req.body;
+    const updates = {};
 
     if (name !== undefined) {
       const cleanName = String(name).trim();
@@ -226,7 +265,7 @@ export const updateProfile = async (req, res) => {
         });
       }
 
-      user.name = cleanName;
+      updates.name = cleanName;
     }
 
     if (email !== undefined) {
@@ -241,9 +280,7 @@ export const updateProfile = async (req, res) => {
 
       const emailOwner = await User.findOne({
         email: cleanEmail,
-        _id: {
-          $ne: user._id,
-        },
+        _id: { $ne: user._id },
       });
 
       if (emailOwner) {
@@ -253,16 +290,23 @@ export const updateProfile = async (req, res) => {
         });
       }
 
-      user.email = cleanEmail;
+      updates.email = cleanEmail;
     }
 
     if (phone !== undefined) {
-      user.phone = String(phone).trim();
+      updates.phone = String(phone).trim();
     }
 
     const previousImagePublicId = user.profileImage?.public_id || "";
 
     if (req.file) {
+      if (!req.file.mimetype?.startsWith("image/")) {
+        return res.status(400).json({
+          success: false,
+          message: "Only image files are allowed for profile picture",
+        });
+      }
+
       console.log("FILE RECEIVED BY CONTROLLER:", {
         originalname: req.file.originalname,
         mimetype: req.file.mimetype,
@@ -275,36 +319,49 @@ export const updateProfile = async (req, res) => {
         "ecommerce/users",
       );
 
-      if (!uploadedImage?.url || !uploadedImage?.public_id) {
-        throw new Error("Cloudinary did not return url and public_id.");
+      const secureUrl = uploadedImage?.url || uploadedImage?.secure_url;
+
+      if (!secureUrl || !uploadedImage?.public_id) {
+        throw new Error("Cloudinary did not return secure_url and public_id.");
       }
 
       newlyUploadedPublicId = uploadedImage.public_id;
 
-      user.set("profileImage", {
-        url: uploadedImage.url,
+      // Persist Cloudinary secure_url explicitly via $set so nested
+      // profileImage is never left as an empty string in MongoDB.
+      updates.profileImage = {
+        url: secureUrl,
         public_id: uploadedImage.public_id,
+      };
+    }
+
+    if (Object.keys(updates).length === 0) {
+      return res.status(400).json({
+        success: false,
+        message: "No profile fields were provided to update",
       });
     }
 
-    // Save exactly once
-    await user.save();
-
-    imageSavedToDatabase = true;
-
-    // Read it again from MongoDB to confirm persistence
-    const savedUser = await User.findById(user._id);
+    const savedUser = await User.findByIdAndUpdate(
+      userId,
+      { $set: updates },
+      {
+        new: true,
+        runValidators: true,
+      },
+    );
 
     if (!savedUser) {
-      throw new Error("User could not be read after profile update.");
+      throw new Error("User could not be updated.");
     }
+
+    imageSavedToDatabase = true;
 
     console.log("PROFILE SAVED IN DATABASE:", {
       userId: savedUser._id,
       profileImage: savedUser.profileImage,
     });
 
-    // Delete the previous Cloudinary image only after DB save succeeds
     if (
       req.file &&
       previousImagePublicId &&
@@ -327,7 +384,6 @@ export const updateProfile = async (req, res) => {
   } catch (error) {
     console.error("UPDATE PROFILE ERROR:", error);
 
-    // Delete a new Cloudinary image only when MongoDB save failed
     if (newlyUploadedPublicId && !imageSavedToDatabase) {
       try {
         await cloudinary.uploader.destroy(newlyUploadedPublicId, {
@@ -356,7 +412,6 @@ export const updateProfile = async (req, res) => {
 export const changePassword = async (req, res) => {
   try {
     const userId = getAuthenticatedUserId(req);
-
     const { currentPassword, newPassword } = req.body;
 
     if (!userId) {
@@ -409,7 +464,6 @@ export const changePassword = async (req, res) => {
     }
 
     user.password = await bcrypt.hash(newPassword, 10);
-
     await user.save();
 
     return res.status(200).json({
@@ -440,31 +494,68 @@ export const forgotPassword = async (req, res) => {
 
     const user = await User.findOne({ email });
 
+    // Avoid revealing whether an email exists
     if (!user) {
-      return res.status(404).json({
-        success: false,
-        message: "User not found",
+      return res.status(200).json({
+        success: true,
+        message:
+          "If an account exists for this email, an OTP has been sent.",
       });
     }
 
-    const otp = Math.floor(100000 + Math.random() * 900000).toString();
-
-    user.otp = otp;
-    user.otpExpiry = new Date(Date.now() + 10 * 60 * 1000);
-
-    await user.save();
+    await issueAndSendOtp(user);
 
     return res.status(200).json({
       success: true,
-      message: "OTP generated successfully",
-      otp,
+      message: "OTP has been sent to your email address",
     });
   } catch (error) {
     console.error("FORGOT PASSWORD ERROR:", error);
 
     return res.status(500).json({
       success: false,
-      message: error.message || "Internal Server Error",
+      message:
+        error.message?.includes("EMAIL_")
+          ? "Email service is not configured. Please contact support."
+          : "Unable to send OTP. Please try again later.",
+    });
+  }
+};
+
+// POST /api/auth/resend-otp
+export const resendOtp = async (req, res) => {
+  try {
+    const email = normalizeEmail(req.body.email);
+
+    if (!email) {
+      return res.status(400).json({
+        success: false,
+        message: "Email is required",
+      });
+    }
+
+    const user = await User.findOne({ email });
+
+    if (!user) {
+      return res.status(200).json({
+        success: true,
+        message:
+          "If an account exists for this email, a new OTP has been sent.",
+      });
+    }
+
+    await issueAndSendOtp(user);
+
+    return res.status(200).json({
+      success: true,
+      message: "A new OTP has been sent to your email address",
+    });
+  } catch (error) {
+    console.error("RESEND OTP ERROR:", error);
+
+    return res.status(500).json({
+      success: false,
+      message: "Unable to resend OTP. Please try again later.",
     });
   }
 };
@@ -482,12 +573,29 @@ export const verifyOtp = async (req, res) => {
       });
     }
 
+    if (!/^\d{6}$/.test(otp)) {
+      return res.status(400).json({
+        success: false,
+        message: "OTP must be a 6-digit code",
+      });
+    }
+
     const user = await User.findOne({ email });
 
-    if (!user) {
-      return res.status(404).json({
+    if (!user || !user.otp) {
+      return res.status(400).json({
         success: false,
-        message: "User not found",
+        message: "Invalid or expired OTP",
+      });
+    }
+
+    if (!user.otpExpiry || user.otpExpiry.getTime() < Date.now()) {
+      clearOtpFields(user);
+      await user.save();
+
+      return res.status(400).json({
+        success: false,
+        message: "OTP has expired. Please request a new one.",
       });
     }
 
@@ -498,12 +606,8 @@ export const verifyOtp = async (req, res) => {
       });
     }
 
-    if (!user.otpExpiry || user.otpExpiry.getTime() < Date.now()) {
-      return res.status(400).json({
-        success: false,
-        message: "OTP has expired",
-      });
-    }
+    user.isOtpVerified = true;
+    await user.save();
 
     return res.status(200).json({
       success: true,
@@ -524,7 +628,6 @@ export const resetPassword = async (req, res) => {
   try {
     const email = normalizeEmail(req.body.email);
     const otp = String(req.body.otp || "").trim();
-
     const { newPassword, confirmPassword } = req.body;
 
     if (!email || !otp || !newPassword || !confirmPassword) {
@@ -550,10 +653,17 @@ export const resetPassword = async (req, res) => {
 
     const user = await User.findOne({ email });
 
-    if (!user) {
-      return res.status(404).json({
+    if (!user || !user.otp) {
+      return res.status(400).json({
         success: false,
-        message: "User not found",
+        message: "Invalid or expired OTP",
+      });
+    }
+
+    if (!user.isOtpVerified) {
+      return res.status(400).json({
+        success: false,
+        message: "Please verify the OTP before resetting your password",
       });
     }
 
@@ -565,22 +675,22 @@ export const resetPassword = async (req, res) => {
     }
 
     if (!user.otpExpiry || user.otpExpiry.getTime() < Date.now()) {
+      clearOtpFields(user);
+      await user.save();
+
       return res.status(400).json({
         success: false,
-        message: "OTP has expired",
+        message: "OTP has expired. Please request a new one.",
       });
     }
 
     user.password = await bcrypt.hash(newPassword, 10);
-
-    user.otp = null;
-    user.otpExpiry = null;
-
+    clearOtpFields(user);
     await user.save();
 
     return res.status(200).json({
       success: true,
-      message: "Password reset successfully",
+      message: "Password reset successfully. You can now log in.",
     });
   } catch (error) {
     console.error("RESET PASSWORD ERROR:", error);

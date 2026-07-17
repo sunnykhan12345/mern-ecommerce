@@ -7,6 +7,7 @@ import {
   updateProfile,
   changePassword,
   forgotPassword,
+  resendOtp,
   verifyOtp,
   resetPassword,
 } from "../controllers/authController.js";
@@ -49,6 +50,7 @@ router.post("/signup", registerUser);
 router.post("/login", loginUser);
 
 router.post("/forgot-password", forgotPassword);
+router.post("/resend-otp", resendOtp);
 router.post("/verify-otp", verifyOtp);
 router.put("/reset-password", resetPassword);
 

@@ -4,7 +4,7 @@
   "main": "server.js",
   "type": "module",
   "scripts": {
-    "dev": "nodemon --exec tsx src/server.js",
+    "dev": "nodemon --watch src --watch .env --ext js,mjs,cjs,json,env --exec tsx src/server.js",
     "build": "tsc",
     "start": "node dist/server.js"
   },

@@ -1,18 +1,8 @@
-import nodemailer from "nodemailer";
-
-const transporter = nodemailer.createTransport({
-  service: "gmail",
-  auth: {
-    user: process.env.EMAIL_USER,
-    pass: process.env.EMAIL_PASS,
-  },
-});
-
-export const sendEmail = async (to, subject, text) => {
-  await transporter.sendMail({
-    from: process.env.EMAIL_USER,
-    to,
-    subject,
-    text,
-  });
-};
+/**
+ * Legacy path — prefer importing from src/utils/sendEmail.js
+ */
+export {
+  sendOtpEmail as sendEmail,
+  sendOtpEmail,
+  default,
+} from "../src/utils/sendEmail.js";
